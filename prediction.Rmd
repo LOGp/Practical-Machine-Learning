@@ -1,0 +1,134 @@
+---
+title: 'Practical Machine Learning: predicting quality activity'
+author: "LOGp"
+date: "17/08/2014"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(caret)
+```
+
+## Executive summary
+
+
+
+## Download and load data
+### Download
+```{r cache=TRUE}
+train_url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+train_file = "train.csv"
+test_url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+test_file = "test.csv"
+
+#download.file(train_url, train_file, "curl")
+#download.file(test_url, test_file, "curl")
+```
+### Load data into R
+```{r cache=TRUE}
+train = read.csv(train_file)
+test = read.csv(test_file)
+```
+
+### Plot classe data
+Just to see if the classes are balanced:
+```{r}
+qplot(classe, data=train)
+```
+
+### Clean data
+Check the data types of data, and cast numerical values to numeric class.
+```{r}
+for (col in c("kurtosis_roll_belt", "kurtosis_picth_belt", "kurtosis_yaw_belt", "skewness_roll_belt",
+              "skewness_roll_belt.1", "skewness_yaw_belt", "max_yaw_belt", "min_yaw_belt",
+              "amplitude_yaw_belt", "kurtosis_roll_arm", "kurtosis_picth_arm", "skewness_yaw_arm",
+              "kurtosis_roll_dumbbell", "kurtosis_picth_dumbbell", "kurtosis_yaw_dumbbell", 
+              "skewness_roll_dumbbell", "skewness_pitch_dumbbell", "skewness_yaw_dumbbell", 
+              "max_yaw_dumbbell", "min_yaw_dumbbell", "amplitude_yaw_dumbbell", "kurtosis_roll_forearm", 
+              "kurtosis_picth_forearm", "kurtosis_yaw_forearm", "skewness_roll_forearm", 
+              "skewness_pitch_forearm", "skewness_yaw_forearm", "max_yaw_forearm", 
+              "min_yaw_forearm", "amplitude_yaw_forearm", "kurtosis_yaw_arm", "skewness_roll_arm",
+              "skewness_pitch_arm")) {
+  train[[col]] = as.numeric(as.character(train[[col]]))
+}
+```
+
+### Define functions for prediction
+
+Remove features with unique values
+```{r}
+remove_unary_features = function (X) {
+  cardinality = sapply(X, function(x) {length(unique(x))})
+  X[, ! cardinality == 1]
+}
+
+```
+
+Populate NA values:
+* median for numeric and values
+```{r}
+set_NA = function (x) {
+  if (class(x) %in% c("numeric", "integer")) {
+    m = median(x, na.rm=TRUE)
+    if (class(x) == "integer") {
+      m = as.integer(m)
+    }
+    x[is.na(x)] = m
+    x
+  }
+  else {
+    x
+  }
+}
+
+populate_NAs = function (X) {
+  as.data.frame(lapply(X, set_NA))
+}
+```
+
+
+
+## Prediction model
+I will train a mutliple logistic regression model, and evaluate the prediction error via cross-validation.
+For that purpose, I will perform 5 regressions, for each class value, and then select the classe as the  one with the hightest probability.
+
+
+
+### Cross validation
+Define 5-folds cross-validation groups:
+```{r}
+k=5
+set.seed(1324)
+folds = createFolds(train$classe, k=k, list=TRUE)
+```
+
+
+Run cross-validation
+```{r}
+#for (i in 1:k) {
+i=k
+  data.train = train[-folds[[i]], ]
+  # These 2 function calls must be decomposed in preproces to apply them to test data
+  data.train = remove_unary_features(data.train)
+  data.train = populate_NAs(data.train)
+  tree.fit = train(classe ~ ., model="rpart", data=data.train)
+  tree.predicted = predict(tree.fit, newdata=data.test)
+
+  lm.fit = lm(classe ~ ., data=data.train)
+
+  data.test = train[folds[[i]], ]
+  # To be removed
+  data.test = remove_unary_features(data.test)
+#}
+```
+
+
+
+
+
+
+
+
+
+
