@@ -22,8 +22,8 @@ train_file = "train.csv"
 test_url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
 test_file = "test.csv"
 
-#download.file(train_url, train_file, "curl")
-#download.file(test_url, test_file, "curl")
+download.file(train_url, train_file, "curl")
+download.file(test_url, test_file, "curl")
 ```
 ### Load data into R
 ```{r cache=TRUE}
@@ -33,13 +33,13 @@ test = read.csv(test_file)
 
 ### Plot classe data
 Just to see if the classes are balanced:
-```{r}
+```{r cache=TRUE}
 qplot(classe, data=train)
 ```
 
 ### Clean data
 Check the data types of data, and cast numerical values to numeric class.
-```{r}
+```{r cache=TRUE}
 for (col in c("kurtosis_roll_belt", "kurtosis_picth_belt", "kurtosis_yaw_belt", "skewness_roll_belt",
               "skewness_roll_belt.1", "skewness_yaw_belt", "max_yaw_belt", "min_yaw_belt",
               "amplitude_yaw_belt", "kurtosis_roll_arm", "kurtosis_picth_arm", "skewness_yaw_arm",
@@ -54,36 +54,52 @@ for (col in c("kurtosis_roll_belt", "kurtosis_picth_belt", "kurtosis_yaw_belt", 
 }
 ```
 
+Remove the first column (X) as it is only an index
+```{r cache=TRUE}
+train = train[, -1]
+test = test[, -1]
+```
+
+
 ### Define functions for prediction
 
 Remove features with unique values
-```{r}
+```{r cache=TRUE}
 remove_unary_features = function (X) {
   cardinality = sapply(X, function(x) {length(unique(x))})
-  X[, ! cardinality == 1]
+  cardinality == 1
 }
 
 ```
 
 Populate NA values:
 * median for numeric and values
-```{r}
+```{r cache=TRUE}
 set_NA = function (x) {
   if (class(x) %in% c("numeric", "integer")) {
     m = median(x, na.rm=TRUE)
     if (class(x) == "integer") {
       m = as.integer(m)
     }
-    x[is.na(x)] = m
-    x
+    m
   }
   else {
-    x
+    NA
   }
 }
 
-populate_NAs = function (X) {
-  as.data.frame(lapply(X, set_NA))
+get_means = function (X) {
+  x = lapply(X, set_NA)
+  as.data.frame(x)
+}
+
+populate_NAs = function (X, means) {
+  result = mapply(function (x, y) {
+    u = is.na(x)
+    x[u] = y
+    x
+  }, X, means)
+  as.data.frame(result)
 }
 ```
 
@@ -92,6 +108,51 @@ populate_NAs = function (X) {
 ## Prediction model
 I will train a mutliple logistic regression model, and evaluate the prediction error via cross-validation.
 For that purpose, I will perform 5 regressions, for each class value, and then select the classe as the  one with the hightest probability.
+
+```{r cache=TRUE}
+build_predictor = function(X, alpha = 1, n.features = 1, features = NA) {
+# print(paste("build:", n.features))
+  p = ncol(X)
+  # Remove classe column
+  X = X[, -c(p-1)]
+  u = names(X)
+  u = u[!u == "y"]
+  if (! is.na(features)) {
+    tmp = strsplit(features, " \\+ ")[[1]]
+    u = u[!u %in% tmp]
+  }
+  p = length(u)
+  n.features = min(n.features, p)
+  # i: number of features
+  for (i in 1:n.features) {
+    fit.feature = function(feature) {
+    fmla = if(is.na(features))
+      paste("y ~ ", feature) else paste("y ~ ", paste(feature, features, sep=" + "))
+# print(fmla)
+    lm.fit = glm(fmla, data=X, family=binomial)
+# print(summary(lm.fit)$coefficients)
+# print(summary(lm.fit)$coefficients[2, 4])
+    max(summary(lm.fit)$coefficients[, 4])
+    } 
+    significance = sort(sapply(u, fit.feature))[1]
+# print(significance)
+    u = u[!u == names(significance)]
+    if (significance < alpha) {
+      # Cbind the most significant feature to features
+      features = if (is.na(features))
+        names(significance) else paste(features, names(significance), sep=" + ")
+    }
+    else {
+      break
+    }
+  }
+  fmla = paste("y ~ ", paste(features, sep=" + "))
+print(fmla)
+  features = paste(features, sep=" + ")
+  glm.fit = glm(fmla, data=X, family=binomial)
+  list(model = glm.fit, features = features)
+}
+```
 
 
 
@@ -105,30 +166,961 @@ folds = createFolds(train$classe, k=k, list=TRUE)
 
 
 Run cross-validation
+```{r cache=TRUE}
+compute_errors = function(n.features = 1, features = matrix(nrow = k, ncol = 5)) {
+  errors = list()
+   for (i in 1:k) {
+    data.train = train[-folds[[i]], ]
+    # Set NA values to means values, for each column
+    u.means = get_means(data.train)
+    data.train = populate_NAs(data.train, u.means)
+    # Remove columns with unique values
+    u.remove = remove_unary_features(data.train)
+    data.train = data.train[, !u.remove]
+  
+    # Move predictor training to a dedicated function
+    ## Split classes to build 5 predictors
+    predictors = list()
+    for (j in 1:5) {
+      # Preprocess data for level j
+      data.train$y = data.train$classe == j
+      # Build predictor for level j
+      answer = build_predictor(data.train, n.features=n.features, features = features[i, j])
+      predictors[[j]] = answer[[1]]
+      features[i, j] <- answer[[2]]
+    }
+    
+    # Evaluate prediction accuracy from test data
+    data.test = train[folds[[i]], ]
+    ## Preprocess data
+    ### NAs set to means
+    data.test = populate_NAs(data.test, u.means)
+    ### Columns drop
+    data.test = data.test[, !u.remove]
+    ## Predict
+    predicted = lapply(predictors, predict, newdata=data.test)
+    predicted = as.data.frame(predicted)
+    ## Get the highest probability as the classe
+    predictions = as.integer(apply(predicted, 1, which.max))
+    ## Compute test accuracy
+    errors[[i]] = 1 - sum(predictions == unclass(data.test$classe)) / nrow(data.test)
+  print(errors[[i]])
+  }
+  list(errors = as.numeric(errors), features = features)
+}
+```
+
+### Get values for different number of predictors
+```{r echo=FALSE, results='hide'}
+errors = matrix(nrow=5, ncol=160)
+```
+
+```{r cache=TRUE, warning=FALSE}
+i = 1
+features = list()
+set.seed(1564286)
+answer = compute_errors(1)
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+
+```{r cache=TRUE, warning=FALSE}
+i = i +1
+print(i)
+set.seed(1564286)
+answer = compute_errors(1, features = features[[i-1]])
+errors[, i] = answer$errors
+features[[i]] = answer$features
+print(features[[i]])
+print(errors[, i])
+```
+
+### Show error rate with different number of features
 ```{r}
-#for (i in 1:k) {
-i=k
-  data.train = train[-folds[[i]], ]
-  # These 2 function calls must be decomposed in preproces to apply them to test data
-  data.train = remove_unary_features(data.train)
-  data.train = populate_NAs(data.train)
-  tree.fit = train(classe ~ ., model="rpart", data=data.train)
-  tree.predicted = predict(tree.fit, newdata=data.test)
+print(features)
+print(errors)
+```
 
-  lm.fit = lm(classe ~ ., data=data.train)
+```{r}
+error = apply(errors, 2, mean)
+error_plot = error[! is.na(error)]
+qplot(x=seq_along(error_plot), y=error_plot, xlab="number of predictors", ylab="error rate") + geom_line()
+p = qplot(x=seq_along(error_plot), y=error_plot, xlab="number of predictors", ylab="error rate") + geom_line()
+save(p, error_plot, file="cv_error")
+```
 
-  data.test = train[folds[[i]], ]
-  # To be removed
-  data.test = remove_unary_features(data.test)
-#}
+```{r}
+print("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
+```
+
+
+## Predict on test data
+```{r cache=TRUE}
+i = 30
+data.train = train
+# Set NA values to means values, for each column
+u.means = get_means(data.train)
+data.train = populate_NAs(data.train, u.means)
+# Remove columns with unique values
+u.remove = remove_unary_features(data.train)
+data.train = data.train[, !u.remove]
+
+predictors = list()
+for (j in 1:5) {
+  # Preprocess data for level j
+  data.train$y = data.train$classe == j
+  # Build predictor for level j
+  answer = build_predictor(data.train, n.features=30)
+  predictors[[j]] = answer[[1]]
+print(answer[[2]])
+}
+
+# Evaluate prediction accuracy from test data
+data.test = test
+## Preprocess data
+### NAs set to means
+data.test = populate_NAs(data.test, u.means)
+### Columns drop
+data.test = data.test[, !u.remove]
+## Predict
+predicted = lapply(predictors, predict, newdata=data.test)
+predicted = as.data.frame(predicted)
+## Get the highest probability as the classe
+predictions = as.integer(apply(predicted, 1, which.max))
+print(predictions)
+```
+
+
+## Build files for submission
+```{r}
+pred = character(20)
+pred[predictions == 1] = "A"
+pred[predictions == 2] = "B"
+pred[predictions == 3] = "C"
+pred[predictions == 4] = "D"
+pred[predictions == 5] = "E"
+
+print(pred)
+
+pml_write_files = function(x) {
+  n = length(x)
+  for (i in 1:n) {
+    filename = paste0("problem_id_", i, ".txt")
+    write.table(x[i], file=filename, quote=FALSE, row.names=FALSE, col.names = FALSE)
+  }
+}
+pml_write_files(pred)
 ```
 
 
 
+```{r}
+print("YYYYYYYYYYYYYYYYYYYYY")
+```
 
+# Predict the manner in wihch the exercice was done
 
+## Executive summary
 
+Thanks to sensor, metrics were collected during different types of activities (walking, running, ...) and labelled based on how well these activities were performed. My goal is to predict in which manner the exercice was performed based on these measures.
+For that purpopose, two datasets were available: a training and a testing one.
+After cleaning the data, I have used a logicistic regression model to predict the probability for each of the 5 classes, restricted to a subset of predictors. The number of predictors has been selected based on an estimate of the testing error rate through cross validation.
+The estimated testing error was around 30% .
+Once this parameter has been selected, a new regressor has been built on the whole training data, and used make predictions on testing data.
 
+The estimated performance of the model is not so good. For better performance, I may:
+* use another model, such as random forest
+* pre-process missing values in a more efficient way
+* have more data
 
+Please note that the R code for the results below have been calculated in the Rmd file before this section, so all the code will not be displayed below. As I have not made a clean code (not factorized enough, no appropriate functions, ...), nor took time to clean it, I did not want to mess it up with the below document.
 
+## Data loading
 
+First, I download the 2 datasets and load them into R.
+```{r eval=FALSE}
+train_url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+train_file = "train.csv"
+test_url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+test_file = "test.csv"
+
+download.file(train_url, train_file, "curl")
+download.file(test_url, test_file, "curl")
+```
+
+```{r eval=FALSE}
+train = read.csv(train_file)
+test = read.csv(test_file)
+```
+
+Then, I load the relevant R packages.
+```{r eval=FALSE}
+library(ggplot2)
+library(caret)
+```
+
+## Data cleaning
+
+I noticed that some numeric features have been imported as factors, due to some strings in the dataset columns. Thus, I convert these features to numeric, both for training and testing data.
+```{r eval=FALSE}
+for (col in c("kurtosis_roll_belt", "kurtosis_picth_belt", "kurtosis_yaw_belt", "skewness_roll_belt",
+              "skewness_roll_belt.1", "skewness_yaw_belt", "max_yaw_belt", "min_yaw_belt",
+              "amplitude_yaw_belt", "kurtosis_roll_arm", "kurtosis_picth_arm", "skewness_yaw_arm",
+              "kurtosis_roll_dumbbell", "kurtosis_picth_dumbbell", "kurtosis_yaw_dumbbell", 
+              "skewness_roll_dumbbell", "skewness_pitch_dumbbell", "skewness_yaw_dumbbell", 
+              "max_yaw_dumbbell", "min_yaw_dumbbell", "amplitude_yaw_dumbbell", "kurtosis_roll_forearm", 
+              "kurtosis_picth_forearm", "kurtosis_yaw_forearm", "skewness_roll_forearm", 
+              "skewness_pitch_forearm", "skewness_yaw_forearm", "max_yaw_forearm", 
+              "min_yaw_forearm", "amplitude_yaw_forearm", "kurtosis_yaw_arm", "skewness_roll_arm",
+              "skewness_pitch_arm")) {
+  train[[col]] = as.numeric(as.character(train[[col]]))
+}
+```
+
+Then, I remove the X column (first column), as it is an index which I will not use.
+```{r eval=FALSE}
+train = train[, -1]
+test = test[, -1]
+```
+
+## Regression model
+
+There are 5 labels for the classe to predict: A, B, C, D, E. I chose to build 5 logistic regression models, one for each label; then, as a final regressor, I chose from the 5 labels, the one with the highest probability.  
+
+But before I built, I had to apply the following pre-processing for each feature:
+1. Set to the mean value when it is initially _NA_
+1. Drop features that has only 1 distinct value (as it will have no impact on the prediction)
+The mean values and the features to drop were identified on the training data, and then applied on both training and testing.  
+
+Besides, I chose not to take all the features as an input for the prediction: only p features were selected. To determine the best p, I iteratively, from 1 to 61 (it was not necessary to go beyond):
+1. Fit a logistic regression model using the previously selected features + 1 of the remaining fetures
+1. Pick the  feature for which the max of the significances of the parameters of the models is minimum
+1. Re-iterate
+This was done for each of the 5 label-models.
+
+## Selection of the best parameter
+
+In order to select the best value of p, I had the estimate the testing error for the each of the p-models.  
+I applied cross-validation, with 5 folds from the training data, and took the mean of the estimated testing error rate.  
+For each of the 5 estimates, I applied the same pre-processing as described above.  
+Below is the plot of the value of p versus the estimated testing error rate:
+```{r}
+# error = apply(errors, 2, mean)
+# error_plot = error[! is.na(error)]
+qplot(x=seq_along(error_plot), y=error_plot, xlab="number of predictors", ylab="error rate") + geom_line()
+# p = qplot(x=seq_along(error_plot), y=error_plot, xlab="number of predictors", ylab="error rate") + geom_line()
+# save(p, error_plot, file="cv_error")
+```
+  
+The best p seems to be 30: it is the one I will use for prediction on testing data.
+
+## Predict on test data
+ 
+As the best value has been determined to be 30 features, I build the 5 logistic models including 30 features, and then apply it to the testing data.
+I got a score of 13/20. This is not a big suprise, as the expected score was `r (1 - error_plot[30]) * 20`.
